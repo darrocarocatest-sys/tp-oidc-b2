@@ -1,0 +1,85 @@
+name: probe
+on:
+  workflow_dispatch:
+    inputs:
+      pkg:
+        description: package to exchange for
+        required: true
+        type: string
+      audience:
+        description: OIDC audience
+        required: false
+        default: 'npm:registry.npmjs.org'
+        type: string
+      tag:
+        description: free-form label for the matrix row
+        required: false
+        default: 'row'
+        type: string
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: mint id_token and exchange at npm
+        env:
+          PKG: ${{ inputs.pkg }}
+          AUD: ${{ inputs.audience }}
+          ROW: ${{ inputs.tag }}
+        run: |
+          set -uo pipefail
+          echo "ROW=$ROW  PKG=$PKG  AUD=$AUD"
+          IDT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$IDT"
+          python3 - "$IDT" <<'PY'
+          import sys, json, base64
+          t = sys.argv[1].split('.')
+          def d(s):
+              s += '=' * (-len(s) % 4)
+              return json.loads(base64.urlsafe_b64decode(s))
+          print("---CLAIMS-BEGIN---")
+          print(json.dumps(d(t[1]), indent=1, sort_keys=True))
+          print("---CLAIMS-END---")
+          print("hdr:", json.dumps(d(t[0])))
+          PY
+          ESC=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote(os.environ["PKG"],safe=""))')
+          URL="https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$ESC"
+          echo "---EXCHANGE-URL--- $URL"
+          CODE=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -D /tmp/resp.hdr -X POST \
+                 -H "Authorization: Bearer $IDT" -H "Content-Type: application/json" "$URL")
+          echo "---EXCHANGE-STATUS--- $CODE"
+          echo "---EXCHANGE-HEADERS---"
+          grep -viE '^(date|cf-ray|server|set-cookie|cf-cache|vary|x-|strict|access-control|content-security|referrer|report-to|nel|alt-svc|connection|cache-control)' /tmp/resp.hdr || true
+          echo "---EXCHANGE-BODY---"
+          python3 - <<'PY'
+          import json, hashlib
+          raw = open('/tmp/resp.json').read()
+          print("raw_len", len(raw))
+          try:
+              b = json.loads(raw)
+          except Exception:
+              print("NON-JSON:", raw[:400]); raise SystemExit
+          if isinstance(b, dict) and 'token' in b:
+              tk = b['token']
+              print("::add-mask::" + tk)
+              print("KEYS", sorted(b.keys()))
+              print("TOKEN_PREFIX", tk[:4], "LEN", len(tk), "SHA256_12", hashlib.sha256(tk.encode()).hexdigest()[:12])
+              red = dict(b); red['token'] = tk[:4] + '<redacted:%d>' % len(tk)
+              print("BODY_REDACTED", json.dumps(red))
+              open('/tmp/npmtok', 'w').write(tk)
+          else:
+              print("BODY", json.dumps(b) if not isinstance(b, str) else b[:400])
+          PY
+          if [ -s /tmp/npmtok ]; then
+            TK=$(cat /tmp/npmtok); echo "::add-mask::$TK"
+            echo "---WHOAMI-WITH-EXCHANGED-TOKEN---"
+            curl -sS -o /tmp/who.json -w 'whoami_http=%{http_code}\n' -H "Authorization: Bearer $TK" https://registry.npmjs.org/-/whoami
+            cat /tmp/who.json; echo
+            echo "---PACKAGE-WRITE-PROBE (read-only check of what the token reaches)---"
+            curl -sS -o /tmp/tok.json -w 'tokens_http=%{http_code}\n' -H "Authorization: Bearer $TK" https://registry.npmjs.org/-/npm/v1/tokens
+            head -c 300 /tmp/tok.json; echo
+          fi
+          echo "---DONE---"
